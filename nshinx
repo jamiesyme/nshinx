@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+
+# args:
+#   status code
+# returns:
+#   status text
+get_status_text() {
+	case "$1" in
+		200) echo "OK" ;;
+		400) echo "Bad Request" ;;
+		404) echo "Not Found" ;;
+		500) echo "Internal Server Error" ;;
+		501) echo "Not Implemented" ;;
+		505) echo "HTTP Version Not Supported" ;;
+		*) echo "" ;;
+	esac
+}
+
+
+# args:
+#   status code [default: 200]
+send_status_line() {
+	# default to 200 response
+	local res_status_code="${1:-200}"
+	local res_status_text=`get_status_text "$res_status_code"`
+	local res_http_version="HTTP/1.1"
+
+	# if the status text is empty, we have generated an unrecognized status code
+	[ -z "$res_status_text" ] && {
+		res_status_code=500
+		res_status_text=`get_status_text "$res_status_code"`
+	}
+
+	# send the status line
+	echo "$res_http_version $res_status_code $res_status_text"
+}
+
+
+# args:
+#   header name
+#   header value
+send_header() {
+	echo "$1: $2"
+}
+
+# args:
+#   none
+finalize_headers() {
+	echo ""
+}
+
+
+# parse the http start line, stripping out \r if present
+read -r req_method req_target req_http_version
+req_http_version="${req_http_version%%$'\r'}"
+[[ -z "$req_method" || -z "$req_target" || -z "$req_http_version" ]] && {
+	send_status_line 400 && exit
+}
+
+# we only implement GET
+[[ "$req_method" != "GET" ]] && {
+	send_status_line 501 && exit
+}
+
+# we only support HTTP/1.1
+[[ "$req_http_version" != "HTTP/1.1" ]] && {
+	send_status_line 505 && exit
+}
+
+# strip the target of the query and fragment strings
+req_target=${req_target%%\?*}
+req_target=${req_target%%#*}
+
+# TODO: validate the target
+
+# resolve the target to a file path
+www_root="/home/jamie/a2"
+file_path="$www_root$req_target"
+
+# do preliminary existence check
+[[ ! -f "$file_path" && ! -d "$file_path" ]] && {
+	send_status_line 404 && exit
+}
+
+# so we know the file exists; now do a security check to see if the file is
+# actually under the www_root (or IS www_root)
+security_check=$(find "$www_root" -wholename "$file_path" -print -quit 2>/dev/null)
+[[ -z "$security_check" && ! "$file_path" -ef "$www_root" ]] && {
+	send_status_line 404 && exit
+}
+
+# we're looking good; send a 200 and the default headers
+send_status_line 200
+send_header "Date" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z")"
+send_header "Server" "nshinx/1.0.0"
+
+# serve a file
+[[ -f "$file_path" ]] && {
+	send_header "Content-Type" "$(file --mime --brief "$file_path")"
+	send_header "Content-Length" "$(stat -c %s "$file_path")"
+	finalize_headers
+	cat "$file_path"
+	exit
+}
+
+# it's not a file, so serve a directory
+dir_output="$(ls "$file_path")"$'\n'
+send_header "Content-Type" "text/plain"
+send_header "Content-Length" "${#dir_output}"
+finalize_headers
+printf '%s' "$dir_output"
+exit

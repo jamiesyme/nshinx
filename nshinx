@@ -93,6 +93,7 @@ security_check=$(find "$www_root" -wholename "$file_path" -print -quit 2>/dev/nu
 send_status_line 200
 send_header "Date" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z")"
 send_header "Server" "nshinx/1.0.0"
+send_header "Last-Modified" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z" -r "$file_path")"
 
 # serve a file
 [[ -f "$file_path" ]] && {

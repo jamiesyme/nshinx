@@ -7,6 +7,7 @@
 get_status_text() {
 	case "$1" in
 		200) echo "OK" ;;
+		304) echo "Not Modified" ;;
 		400) echo "Bad Request" ;;
 		404) echo "Not Found" ;;
 		500) echo "Internal Server Error" ;;
@@ -52,11 +53,20 @@ finalize_headers() {
 
 
 # args:
+#   string to strip
+# returns:
+#   stripped string
+strip_carriage_returns() {
+	printf "${1//[$'\r']}"
+}
+
+
+# args:
 #   none
 serve() {
-	# parse the http start line, stripping out \r if present
+	# parse the http start line
 	read -r req_method req_target req_http_version
-	req_http_version="${req_http_version%%$'\r'}"
+	req_http_version="$(strip_carriage_returns "$req_http_version")"
 	[[ -z "$req_method" || -z "$req_target" || -z "$req_http_version" ]] && {
 		send_status_line 400 && return
 	}
@@ -92,11 +102,56 @@ serve() {
 		send_status_line 404 && return
 	}
 
-	# we're looking good; send a 200 and the default headers
+	# look for caching headers
+	local cache_mod_time=
+	local cache_etag=
+	while true ; do
+		read -r name value
+		name="$(strip_carriage_returns "$name")"
+		value="$(strip_carriage_returns "$value")"
+
+		# check for end of headers
+		[[ -z "$name" ]] && break
+
+		# normalize the header name
+		name="${name,,}" # to lowercase
+		name="${name%:}" # remove colon separator
+
+		# look for certain headers
+		case "$name" in
+			'if-modified-since')
+				cache_mod_time="$value"
+				;;
+			'if-none-match')
+				cache_etag="$value"
+				;;
+		esac
+	done
+
+	# get the file's last modified time and etag
+	local file_mod_time=$(date -u +"%a, %d %b %Y %H:%M:%S %Z" -r "$file_path")
+	local file_etag=$(md5sum "$file_path" | cut -d ' ' -f 1)
+
+	# check conditional (cache-enabled) requests
+	[[ ! -z "$cache_mod_time" ]] && {
+		local file_mod_time_epoch=$(date -d "$file_mod_time" +"%s")
+		local cache_mod_time_epoch=$(date -d "$cache_mod_time" +"%s")
+		if (( file_mod_time_epoch <= cache_mod_time_epoch )) ; then
+			send_status_line 304 && return
+		fi
+	}
+	[[ ! -z "$cache_etag" ]] && {
+		[[ "$file_etag" == "$cache_etag" ]] && {
+			send_status_line 304 && return
+		}
+	}
+
+	# send a 200 and the default headers
 	send_status_line 200
 	send_header "Date" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z")"
 	send_header "Server" "nshinx/1.0.0"
-	send_header "Last-Modified" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z" -r "$file_path")"
+	send_header "Last-Modified" "$file_mod_time"
+	send_header "ETag" "$file_etag"
 
 	# serve a file
 	[[ -f "$file_path" ]] && {

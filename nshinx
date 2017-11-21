@@ -43,6 +43,7 @@ send_header() {
 	echo "$1: $2"
 }
 
+
 # args:
 #   none
 finalize_headers() {
@@ -50,64 +51,111 @@ finalize_headers() {
 }
 
 
-# parse the http start line, stripping out \r if present
-read -r req_method req_target req_http_version
-req_http_version="${req_http_version%%$'\r'}"
-[[ -z "$req_method" || -z "$req_target" || -z "$req_http_version" ]] && {
-	send_status_line 400 && exit
-}
+# args:
+#   none
+serve() {
+	# parse the http start line, stripping out \r if present
+	read -r req_method req_target req_http_version
+	req_http_version="${req_http_version%%$'\r'}"
+	[[ -z "$req_method" || -z "$req_target" || -z "$req_http_version" ]] && {
+		send_status_line 400 && return
+	}
 
-# we only implement GET
-[[ "$req_method" != "GET" ]] && {
-	send_status_line 501 && exit
-}
+	# we only implement GET
+	[[ "$req_method" != "GET" ]] && {
+		send_status_line 501 && return
+	}
 
-# we only support HTTP/1.1
-[[ "$req_http_version" != "HTTP/1.1" ]] && {
-	send_status_line 505 && exit
-}
+	# we only support HTTP/1.1
+	[[ "$req_http_version" != "HTTP/1.1" ]] && {
+		send_status_line 505 && return
+	}
 
-# strip the target of the query and fragment strings
-req_target=${req_target%%\?*}
-req_target=${req_target%%#*}
+	# strip the target of the query and fragment strings
+	req_target=${req_target%%\?*}
+	req_target=${req_target%%#*}
 
-# TODO: validate the target
+	# TODO: validate the target
 
-# resolve the target to a file path
-www_root="/home/jamie/a2"
-file_path="$www_root$req_target"
+	# resolve the target to a file path
+	file_path="$WWW_ROOT$req_target"
 
-# do preliminary existence check
-[[ ! -f "$file_path" && ! -d "$file_path" ]] && {
-	send_status_line 404 && exit
-}
+	# do preliminary existence check
+	[[ ! -f "$file_path" && ! -d "$file_path" ]] && {
+		send_status_line 404 && return
+	}
 
-# so we know the file exists; now do a security check to see if the file is
-# actually under the www_root (or IS www_root)
-security_check=$(find "$www_root" -wholename "$file_path" -print -quit 2>/dev/null)
-[[ -z "$security_check" && ! "$file_path" -ef "$www_root" ]] && {
-	send_status_line 404 && exit
-}
+	# so we know the file exists; now do a security check to see if the file is
+	# actually under the WWW_ROOT (or IS WWW_ROOT)
+	security_check=$(find "$WWW_ROOT" -wholename "$file_path" -print -quit 2>/dev/null)
+	[[ -z "$security_check" && ! "$file_path" -ef "$WWW_ROOT" ]] && {
+		send_status_line 404 && return
+	}
 
-# we're looking good; send a 200 and the default headers
-send_status_line 200
-send_header "Date" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z")"
-send_header "Server" "nshinx/1.0.0"
-send_header "Last-Modified" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z" -r "$file_path")"
+	# we're looking good; send a 200 and the default headers
+	send_status_line 200
+	send_header "Date" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z")"
+	send_header "Server" "nshinx/1.0.0"
+	send_header "Last-Modified" "$(date -u +"%a, %d %b %Y %H:%M:%S %Z" -r "$file_path")"
 
-# serve a file
-[[ -f "$file_path" ]] && {
-	send_header "Content-Type" "$(file --mime --brief "$file_path")"
-	send_header "Content-Length" "$(stat -c %s "$file_path")"
+	# serve a file
+	[[ -f "$file_path" ]] && {
+		send_header "Content-Type" "$(file --mime --brief "$file_path")"
+		send_header "Content-Length" "$(stat -c %s "$file_path")"
+		finalize_headers
+		cat "$file_path"
+		return
+	}
+
+	# it's not a file, so serve a directory
+	dir_output="$(ls "$file_path")"$'\n'
+	send_header "Content-Type" "text/plain"
+	send_header "Content-Length" "${#dir_output}"
 	finalize_headers
-	cat "$file_path"
+	printf '%s' "$dir_output"
+}
+
+
+# args:
+#   config file [default: httpd.conf]
+load_config() {
+	# if the config file wasn't specified, try the default config file, before
+	# falling back to default values
+	[[ -z "$1" ]] && {
+
+		# try the default config file
+		local config_file="httpd.conf"
+		[[ -f "$config_file" ]] && {
+			load_config "$config_file"
+			return "$?"
+		}
+
+		# use default values
+		PORT="8080"
+		WWW_ROOT="/var/www/html"
+		return
+	}
+
+	# the config file was specified, so try that, or fail hard
+	source "$1" || {
+		return 1
+	}
+}
+
+
+# if the script is run with a "serve" parameter, run as server
+[[ "$1" == "serve" ]] && {
+	load_config || {
+		echo "failed to load the config file"
+		exit 1
+	}
+	socat "tcp-listen:$PORT,fork" "exec:$0"
 	exit
 }
 
-# it's not a file, so serve a directory
-dir_output="$(ls "$file_path")"$'\n'
-send_header "Content-Type" "text/plain"
-send_header "Content-Length" "${#dir_output}"
-finalize_headers
-printf '%s' "$dir_output"
-exit
+
+# serve a single request
+load_config || {
+	send_status_line 500 && exit 1
+}
+serve
